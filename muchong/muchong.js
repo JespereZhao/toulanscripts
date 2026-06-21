@@ -1,5 +1,5 @@
 /*
- Author: @toulanboy Revision：@kalsey
+ Author: @toulanboy 
  
 📕地址：https://github.com/toulanboy/scripts
 📌不定期更新各种签到、有趣的脚本，欢迎star🌟
@@ -183,14 +183,23 @@ function Env(s) {
         }
     }), this.wait = ((s, t = s) => i => setTimeout(() => i(), Math.floor(Math.random() * (t - s + 1) + s))), this.get = ((s, t) => this.send(s, "GET", t)), this.post = ((s, t) => this.send(s, "POST", t)), this.send = ((s, t, i) => {
         if (this.isSurge()) {
-            const httpMethod = "POST" == t ? $httpClient.post : $httpClient.get;
-            httpMethod(s, (error, response, data) => {
-                if (response) {
-                    response.body = data;
-                    response.statusCode = response.status;
-                }
-                i(error, response, data);
-            })
+            if ("POST" == t) {
+                $httpClient.post(s, (error, response, data) => {
+                    if (response) {
+                        response.body = data;
+                        response.statusCode = response.status;
+                    }
+                    i(error, response, data);
+                })
+            } else {
+                $httpClient.get(s, (error, response, data) => {
+                    if (response) {
+                        response.body = data;
+                        response.statusCode = response.status;
+                    }
+                    i(error, response, data);
+                })
+            }
         }
         this.isQuanX() && (s.method = t, $task.fetch(s).then(s => {
             s.status = s.statusCode, i(null, s, s.body)
