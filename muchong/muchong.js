@@ -65,7 +65,7 @@ function writeData(val, key) {
     return false;
 }
 function httpPost(options, callback) {
-    if (isSurge) {
+    if (isSurge || isLoon) {
         $httpClient.post(options, function(error, response, data) {
             if (response) {
                 response.statusCode = response.status;
@@ -79,13 +79,6 @@ function httpPost(options, callback) {
             callback(null, resp, resp.body);
         }, function(err) {
             callback(err.error, err, err);
-        });
-    } else if (isLoon) {
-        $httpClient.post(options, function(error, response, data) {
-            if (response) {
-                response.statusCode = response.status;
-            }
-            callback(error, response, data);
         });
     }
 }
@@ -138,6 +131,16 @@ function buildHeaders() {
     
     return headers;
 }
+// ============================================================
+// 关键修改：服务器返回 GBK 编码页面，Surge 按 UTF-8 解码后
+// 中文全部变成乱码，所以匹配时只能使用纯 ASCII 的 HTML 标签
+// 和属性名，不能依赖中文文字匹配。
+// 
+// 策略：
+//   1. 查找 formhash 隐藏字段（纯 ASCII）→ 尚未签到，需要签到
+//   2. 查找 <em>数字</em> 模式（纯 ASCII）→ 已签到，提取金币数
+//   3. 签到POST后同样用 <em> 标签解析金币数
+// ============================================================
 function getHashcode() {
     return new Promise(function(resolve, reject) {
         var headers = buildHeaders();
@@ -154,7 +157,6 @@ function getHashcode() {
         };
         
         log('开始获取签到信息...');
-        if (debugMode) log('请求参数: ' + JSON.stringify(options));
         
         httpPost(options, function(error, response, data) {
             if (error) {
@@ -166,44 +168,59 @@ function getHashcode() {
             
             var statusCode = response ? (response.status || response.statusCode) : 0;
             log('响应状态码: ' + statusCode);
-            if (debugMode) log('响应内容: ' + (data ? data.substring(0, 500) : 'null'));
             
             if (statusCode == 404) {
-                log('签到网址404，找不到相关信息');
-                notify(scriptName, '签到网址404', '可能是服务器临时维护，若持续多天无法签到，请联系Github@toulanboy');
+                notify(scriptName, '签到网址404', '可能是服务器临时维护');
                 resolve({ needSign: false });
                 return;
             }
             
             if (!data) {
-                log('响应数据为空');
-                notify(scriptName, '❌签到失败', '服务器返回空数据，cookie可能已失效');
+                notify(scriptName, '❌签到失败', '服务器返回空数据');
                 resolve({ needSign: false });
                 return;
             }
             
-            if (data.match(/点击拆红包/)) {
-                var result = data.match(/id=\"formhash\" value=\"(.*?)\"/);
-                if (result) {
-                    log('✅已找到formhash: ' + result[1]);
-                    resolve({ needSign: true, formhash: result[1] });
-                } else {
-                    log('找不到formhash，cookie可能已失效');
-                    notify(scriptName, '找不到formhash', 'cookie可能已失效，请重新获取。');
-                    resolve({ needSign: false });
-                }
-            } else if (data.match(/已连续/)) {
-                var coin = data.match(/<em>(\d+?)<\/em>/);
-                var otherMsg = data.match(/已连续.*?(\d+).*?天领取，连续.*?(\d+).*?天得大礼包/);
-                var msg = '重复签到';
-                if (coin && otherMsg) {
-                    msg = '重复签到，签到情况如下：\n1️⃣获得金币' + coin[1] + '\n2️⃣' + otherMsg[0];
-                }
-                notify(scriptName, '', msg);
+            // 【核心匹配逻辑 - 仅使用ASCII模式，不依赖中文】
+            
+            // 1. 尝试提取 formhash（纯ASCII标签属性）
+            //    匹配: <input type="hidden" name="formhash" value="xxxx">
+            //    或:   id="formhash" value="xxxx"
+            var formhashResult = data.match(/name="formhash"\s+value="([a-f0-9]+)"/i) 
+                              || data.match(/id="formhash"\s+value="([a-f0-9]+)"/i)
+                              || data.match(/value="([a-f0-9]+)"\s+(?:name|id)="formhash"/i);
+            
+            // 2. 检查是否有 creditsubmit 表单（签到按钮，纯ASCII）
+            var hasSubmitBtn = /name="creditsubmit"/i.test(data) 
+                            || /creditsubmit/i.test(data);
+            
+            // 3. 检查 <em>数字</em> 模式（金币数，纯ASCII标签）
+            var coinResult = data.match(/<em>(\d+)<\/em>/i);
+            
+            if (debugMode) {
+                log('formhash匹配: ' + (formhashResult ? formhashResult[1] : 'null'));
+                log('签到按钮: ' + hasSubmitBtn);
+                log('金币匹配: ' + (coinResult ? coinResult[1] : 'null'));
+            }
+            
+            if (formhashResult && hasSubmitBtn) {
+                // 找到formhash和签到按钮 → 需要签到
+                log('✅已找到formhash: ' + formhashResult[1] + '，准备签到');
+                resolve({ needSign: true, formhash: formhashResult[1] });
+            } else if (coinResult) {
+                // 找到金币信息 → 已经签到过了
+                log('已签到，获得金币: ' + coinResult[1]);
+                notify(scriptName, '', '重复签到，今日已获得金币' + coinResult[1]);
                 resolve({ needSign: false });
+            } else if (formhashResult) {
+                // 只找到formhash但没有签到按钮，也尝试签到
+                log('✅找到formhash: ' + formhashResult[1] + '，尝试签到');
+                resolve({ needSign: true, formhash: formhashResult[1] });
             } else {
-                log('找不到相关信息，返回内容前200字: ' + data.substring(0, 200));
-                notify(scriptName, '❌签到异常', 'cookie可能已失效，请重新获取。');
+                // 都没找到
+                log('找不到formhash，页面可能已变更或cookie失效');
+                log('返回内容前300字: ' + data.substring(0, 300));
+                notify(scriptName, '❌签到异常', 'cookie可能已失效或页面结构已变更，请重新获取Cookie');
                 resolve({ needSign: false });
             }
         });
@@ -224,7 +241,7 @@ function checkin(formhash) {
             timeout: 30
         };
         
-        log('开始签到...');
+        log('开始签到，formhash=' + formhash);
         
         httpPost(options, function(error, response, data) {
             if (error) {
@@ -234,16 +251,25 @@ function checkin(formhash) {
                 return;
             }
             
-            if (debugMode) log('签到响应: ' + (data ? data.substring(0, 500) : 'null'));
+            log('签到响应状态码: ' + (response ? (response.status || response.statusCode) : 'null'));
             
             if (data) {
-                var coin = data.match(/<em>(\d+?)<\/em>/);
-                var otherMsg = data.match(/已连续.*?(\d+).*?天领取，连续.*?(\d+).*?天得大礼包/);
-                if (coin && otherMsg) {
-                    notify(scriptName, '', '✅签到成功，签到情况如下：\n1️⃣获得金币' + coin[1] + '\n2️⃣' + otherMsg[0]);
+                // 使用纯ASCII的 <em>数字</em> 模式匹配金币数
+                var coinResult = data.match(/<em>(\d+)<\/em>/i);
+                
+                if (coinResult) {
+                    log('✅签到成功，获得金币: ' + coinResult[1]);
+                    notify(scriptName, '✅签到成功', '获得金币' + coinResult[1]);
                 } else {
-                    log('签到响应格式不匹配');
-                    notify(scriptName, '签到结果', '签到已执行，但无法解析结果');
+                    log('签到已执行，但无法从响应中解析金币数');
+                    log('签到响应前300字: ' + data.substring(0, 300));
+                    // 检查是否包含成功的标记（ASCII可检测的）
+                    if (data.indexOf('formhash') === -1 && data.indexOf('creditsubmit') === -1) {
+                        // 签到表单消失了，说明签到可能成功了
+                        notify(scriptName, '✅签到可能成功', '签到已执行，请在App中确认结果');
+                    } else {
+                        notify(scriptName, '⚠️签到结果未知', '请在App中确认签到状态');
+                    }
                 }
             } else {
                 notify(scriptName, '❌签到失败', '服务器返回空数据');
